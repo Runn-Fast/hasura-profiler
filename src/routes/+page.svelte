@@ -12,24 +12,15 @@
 	let hasuraPassword = $state('TripleCommaClub');
 	let showPassword = $state(false);
 
-	// Account selection
-	let accountSearchQuery = $state('');
-	let accountSearchId = $state('');
-	let accounts = $state<Array<{ id: number; name: string }>>([]);
-	let selectedAccount = $state<{ id: number; name: string } | null>(null);
-
 	// User selection
 	let userSearchQuery = $state('');
 	let userSearchId = $state('');
 	let users = $state<
 		Array<{
-			user: {
-				id: number;
-				first_name: string;
-				last_name: string;
-				email: string;
-			};
-			permissions: string[];
+			id: number;
+			first_name: string;
+			last_name: string;
+			email: string;
 		}>
 	>([]);
 	let selectedUser = $state<{
@@ -38,6 +29,10 @@
 		last_name: string;
 		email: string;
 	} | null>(null);
+
+	// Account selection
+	let accounts = $state<Array<{ id: number; name: string }>>([]);
+	let selectedAccount = $state<{ id: number; name: string } | null>(null);
 
 	// Role selection
 	const roles: string[] = [
@@ -106,53 +101,7 @@
 		});
 	});
 
-	async function searchAccounts(): Promise<void> {
-		error = null;
-		isLoading = true;
-
-		try {
-			const id = parseInt(accountSearchId) || 0;
-			const queryText = `%${accountSearchQuery}%`;
-
-			const response = await fetch(`${hasuraUrl}/v1/graphql`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'x-hasura-admin-secret': hasuraPassword
-				},
-				body: JSON.stringify({
-					query: `
-            query findAccount($id: Int!, $query: String!) {
-              accounts(limit: 5, where: {_or: [{id: {_eq: $id}}, {name: {_ilike: $query}}]}) {
-                id
-                name
-              }
-            }
-          `,
-					variables: {
-						id,
-						query: queryText
-					}
-				})
-			});
-
-			const result = await response.json();
-
-			if (result.errors) {
-				error = result.errors[0].message;
-			} else {
-				accounts = result.data.accounts;
-			}
-		} catch (err: unknown) {
-			error = err.message;
-		} finally {
-			isLoading = false;
-		}
-	}
-
 	async function searchUsers(): Promise<void> {
-		if (!selectedAccount) return;
-
 		error = null;
 		isLoading = true;
 
@@ -168,33 +117,16 @@
 				},
 				body: JSON.stringify({
 					query: `
-            query findUser($accountId: Int!, $id: Int!, $query: String!) {
-              user_accounts(
-                limit: 5,
-                where: {
-                  account_id: {_eq: $accountId},
-                  user: {
-                    _or: [
-                      {id: {_eq: $id}},
-                      {email: {_ilike: $query}},
-                      {last_name: {_ilike: $query}},
-                      {first_name: {_ilike: $query}}
-                    ]
-                  }
-                }
-              ) {
-                user {
-                  id
-                  first_name
-                  last_name
-                  email
-                }
-                permissions
+            query findUser($id: Int!, $query: String!) {
+              users(limit: 5, where: {_or: [{id: {_eq: $id}}, {email: {_ilike: $query}}, {last_name: {_ilike: $query}}, {first_name: {_ilike: $query}}]}) {
+                id
+                first_name
+                last_name
+                email
               }
             }
           `,
 					variables: {
-						accountId: selectedAccount.id,
 						id,
 						query: queryText
 					}
@@ -206,36 +138,82 @@
 			if (result.errors) {
 				error = result.errors[0].message;
 			} else {
-				users = result.data.user_accounts;
+				users = result.data.users;
 			}
 		} catch (err: unknown) {
-			error = err.message;
+			error = err instanceof Error ? err.message : String(err);
 		} finally {
 			isLoading = false;
 		}
 	}
 
-	function selectAccount(account: { id: number; name: string }): void {
-		selectedAccount = account;
-		selectedUser = null;
-		users = [];
+	async function loadUserAccounts(): Promise<void> {
+		if (!selectedUser) return;
+
+		error = null;
+		isLoading = true;
+		accounts = [];
+		selectedAccount = null;
+
+		try {
+			const response = await fetch(`${hasuraUrl}/v1/graphql`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-hasura-admin-secret': hasuraPassword
+				},
+				body: JSON.stringify({
+					query: `
+            query listAccounts($userId: Int!) {
+              user_accounts(where: {user_id: {_eq: $userId}}) {
+                account {
+                  id
+                  name
+                }
+              }
+            }
+          `,
+					variables: {
+						userId: selectedUser.id
+					}
+				})
+			});
+
+			const result = await response.json();
+
+			if (result.errors) {
+				error = result.errors[0].message;
+			} else {
+				accounts = result.data.user_accounts.map(
+					(ua: { account: { id: number; name: string } }) => ua.account
+				);
+			}
+		} catch (err: unknown) {
+			error = err instanceof Error ? err.message : String(err);
+		} finally {
+			isLoading = false;
+		}
 	}
 
-	function selectUser(userAccount: {
-		user: {
-			id: number;
-			first_name: string;
-			last_name: string;
-			email: string;
-		};
-		permissions: string[];
+	function selectUser(user: {
+		id: number;
+		first_name: string;
+		last_name: string;
+		email: string;
 	}): void {
-		selectedUser = userAccount.user;
+		selectedUser = user;
+		selectedAccount = null;
+		accounts = [];
+		loadUserAccounts();
+	}
+
+	function selectAccount(account: { id: number; name: string }): void {
+		selectedAccount = account;
 	}
 
 	async function executeQuery(): Promise<void> {
 		if (!selectedAccount || !selectedUser) {
-			error = 'Please select an account and user first';
+			error = 'Please select a user and account first';
 			return;
 		}
 
@@ -273,7 +251,7 @@
 			const result = await response.json();
 			queryResult = result;
 		} catch (err: unknown) {
-			error = err.message;
+			error = err instanceof Error ? err.message : String(err);
 		} finally {
 			isLoading = false;
 		}
@@ -323,7 +301,7 @@
 					class="w-full p-2 border rounded-l"
 				/>
 				<button
-					onclick={() => (showPassword = !showPassword)}
+					on:click={() => (showPassword = !showPassword)}
 					class="bg-gray-200 px-3 rounded-r border border-l-0"
 				>
 					{showPassword ? 'Hide' : 'Show'}
@@ -332,40 +310,86 @@
 		</div>
 	</div>
 
-	<!-- Account Selection -->
+	<!-- User Selection -->
 	<div class="mb-6">
-		<h2 class="text-lg font-semibold mb-2">Select Account</h2>
+		<h2 class="text-lg font-semibold mb-2">Select User</h2>
 		<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
 			<input
 				type="text"
-				bind:value={accountSearchId}
+				bind:value={userSearchId}
 				placeholder="Search by ID"
 				class="p-2 border rounded"
 			/>
 			<input
 				type="text"
-				bind:value={accountSearchQuery}
-				placeholder="Search by Name"
+				bind:value={userSearchQuery}
+				placeholder="Search by Email/Name"
 				class="p-2 border rounded"
 			/>
 			<button
-				onclick={searchAccounts}
+				on:click={searchUsers}
 				class="bg-blue-500 text-white p-2 rounded"
 				disabled={isLoading}
 			>
-				{isLoading ? 'Searching...' : 'Search Accounts'}
+				{isLoading ? 'Searching...' : 'Search Users'}
 			</button>
 		</div>
 
-		{#if accounts.length > 0}
+		{#if users.length > 0}
 			<div class="mt-4">
 				<h3 class="font-medium mb-2">Results:</h3>
+				<div class="border rounded divide-y">
+					{#each users as user}
+						<div
+							class="p-3 hover:bg-gray-100 cursor-pointer"
+							class:bg-blue-100={selectedUser && selectedUser.id === user.id}
+							on:click={() => selectUser(user)}
+						>
+							<div class="flex justify-between">
+								<span><strong>ID:</strong> {user.id}</span>
+								<span><strong>Name:</strong> {user.first_name} {user.last_name}</span>
+							</div>
+							<div><strong>Email:</strong> {user.email}</div>
+						</div>
+					{/each}
+				</div>
+			</div>
+		{/if}
+
+		{#if selectedUser}
+			<div class="mt-4 p-3 bg-blue-50 rounded">
+				<h3 class="font-medium">Selected User:</h3>
+				<p>
+					<strong>ID:</strong>
+					{selectedUser.id} -
+					<strong>Name:</strong>
+					{selectedUser.first_name}
+					{selectedUser.last_name} -
+					<strong>Email:</strong>
+					{selectedUser.email}
+				</p>
+			</div>
+		{/if}
+	</div>
+
+	<!-- Account Selection -->
+	<div class="mb-6">
+		<h2 class="text-lg font-semibold mb-2">Available Accounts</h2>
+
+		{#if !selectedUser}
+			<p class="text-amber-600">Please select a user first</p>
+		{:else if isLoading && accounts.length === 0}
+			<p>Loading accounts...</p>
+		{:else if accounts.length === 0}
+			<p>No accounts found for this user</p>
+		{:else}
+			<div class="mt-4">
 				<div class="border rounded divide-y">
 					{#each accounts as account}
 						<div
 							class="p-3 hover:bg-gray-100 cursor-pointer flex justify-between"
 							class:bg-blue-100={selectedAccount && selectedAccount.id === account.id}
-							onclick={() => selectAccount(account)}
+							on:click={() => selectAccount(account)}
 						>
 							<span><strong>ID:</strong> {account.id}</span>
 							<span><strong>Name:</strong> {account.name}</span>
@@ -380,81 +404,11 @@
 				<h3 class="font-medium">Selected Account:</h3>
 				<p>
 					<strong>ID:</strong>
-					{selectedAccount.id} - <strong>Name:</strong>
+					{selectedAccount.id} -
+					<strong>Name:</strong>
 					{selectedAccount.name}
 				</p>
 			</div>
-		{/if}
-	</div>
-
-	<!-- User Selection -->
-	<div class="mb-6">
-		<h2 class="text-lg font-semibold mb-2">Select User</h2>
-
-		{#if !selectedAccount}
-			<p class="text-amber-600">Please select an account first</p>
-		{:else}
-			<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-				<input
-					type="text"
-					bind:value={userSearchId}
-					placeholder="Search by ID"
-					class="p-2 border rounded"
-				/>
-				<input
-					type="text"
-					bind:value={userSearchQuery}
-					placeholder="Search by Email/Name"
-					class="p-2 border rounded"
-				/>
-				<button
-					onclick={searchUsers}
-					class="bg-blue-500 text-white p-2 rounded"
-					disabled={isLoading}
-				>
-					{isLoading ? 'Searching...' : 'Search Users'}
-				</button>
-			</div>
-
-			{#if users.length > 0}
-				<div class="mt-4">
-					<h3 class="font-medium mb-2">Results:</h3>
-					<div class="border rounded divide-y">
-						{#each users as userAccount}
-							<div
-								class="p-3 hover:bg-gray-100 cursor-pointer"
-								class:bg-blue-100={selectedUser && selectedUser.id === userAccount.user.id}
-								onclick={() => selectUser(userAccount)}
-							>
-								<div class="flex justify-between">
-									<span><strong>ID:</strong> {userAccount.user.id}</span>
-									<span
-										><strong>Name:</strong>
-										{userAccount.user.first_name}
-										{userAccount.user.last_name}</span
-									>
-								</div>
-								<div><strong>Email:</strong> {userAccount.user.email}</div>
-							</div>
-						{/each}
-					</div>
-				</div>
-			{/if}
-
-			{#if selectedUser}
-				<div class="mt-4 p-3 bg-blue-50 rounded">
-					<h3 class="font-medium">Selected User:</h3>
-					<p>
-						<strong>ID:</strong>
-						{selectedUser.id} -
-						<strong>Name:</strong>
-						{selectedUser.first_name}
-						{selectedUser.last_name} -
-						<strong>Email:</strong>
-						{selectedUser.email}
-					</p>
-				</div>
-			{/if}
 		{/if}
 	</div>
 
@@ -483,7 +437,7 @@
 	<!-- Execute Query -->
 	<div class="mb-6">
 		<button
-			onclick={executeQuery}
+			on:click={executeQuery}
 			class="bg-green-500 text-white p-3 rounded w-full"
 			disabled={isLoading || !selectedAccount || !selectedUser}
 		>

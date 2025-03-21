@@ -5,14 +5,20 @@ import { type } from 'arktype';
 import type { Storage } from '$lib/utils/storage.js';
 
 /**
- * Hasura connection details
+ * Hasura serverList storage format
  */
-const parseHasuraConnectionJSON = type('string.json.parse').to({
-	server: 'string',
-	adminPassword: 'string'
+const parseHasuraserverListJSON = type('string.json.parse').to({
+	serverList: type({
+		id: 'string',
+		name: 'string',
+		url: 'string',
+		password: 'string'
+	}).array(),
+	selectedServerId: 'string?'
 });
 
-type HasuraConnection = typeof parseHasuraConnectionJSON.infer;
+type HasuraserverListJSON = typeof parseHasuraserverListJSON.infer;
+type Server = HasuraserverListJSON['serverList'][number];
 
 /**
  * GraphQL query result
@@ -75,13 +81,15 @@ type ExecuteSQLOptions = {
  */
 type HasuraStore = {
 	// State properties
-	readonly server: string;
-	readonly adminPassword: string;
+	readonly serverList: Server[];
+	readonly selectedServer: Server | undefined;
 	readonly connection: HasuraConnectionStatus;
 
 	// Methods
-	updateConnection(server: string, adminPassword: string): void;
-	clearConnection(): void;
+	addServer(name: string, url: string, password: string): string;
+	updateServer(id: string, name: string, url: string, password: string): void;
+	removeServer(id: string): void;
+	selectServer(id: string): void;
 	testConnection(): Promise<boolean>;
 	executeGraphQL<T = Record<string, unknown>>(
 		query: string,
@@ -91,83 +99,210 @@ type HasuraStore = {
 };
 
 /**
- * Creates a Hasura store for managing connection and query execution
+ * Executes a GraphQL query against a Hasura server
+ * @param server - The server to execute against
+ * @param query - The GraphQL query to execute
+ * @param variables - Variables for the GraphQL query
+ * @returns The query result
+ */
+const executeGraphQL = async <T = Record<string, unknown>>(
+	server: Server,
+	query: string,
+	variables: Record<string, unknown> = {}
+): Promise<{ data: T } | Error> => {
+	return errorBoundary(async () => {
+		const response = await fetch(`${server.url}/v1/graphql`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-hasura-admin-secret': server.password
+			},
+			body: JSON.stringify({
+				query,
+				variables
+			})
+		});
+
+		const data = (await response.json()) as GraphQLResult<T>;
+
+		if (data.errors?.length) {
+			const errorMessage = data.errors[0]?.message || 'GraphQL query failed';
+			throw new Error(errorMessage);
+		}
+
+		return data as { data: T };
+	});
+};
+
+/**
+ * Executes a raw SQL query against a Hasura server
+ * @param server - The server to execute against
+ * @param sql - The SQL query to execute
+ * @param options - Options for SQL execution
+ * @returns The query result
+ */
+const executeSQL = async (
+	server: Server,
+	sql: string,
+	options: ExecuteSQLOptions = {}
+): Promise<HasuraQueryResult | Error> => {
+	const { allowMutations = false } = options;
+
+	return errorBoundary(async () => {
+		const response = await fetch(`${server.url}/v2/query`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-hasura-admin-secret': server.password
+			},
+			body: JSON.stringify({
+				status: 'run_sql',
+				args: {
+					source: 'default',
+					sql,
+					cascade: false,
+					read_only: !allowMutations
+				}
+			})
+		});
+
+		if (!response.ok) {
+			const errorData = parseHasuraQueryError(await response.json());
+			if (errorData instanceof type.errors) {
+				return new TypeError(errorData.summary);
+			}
+			return new Error(errorData.error || 'SQL query failed');
+		}
+
+		const result = parseHasuraQueryResult(await response.json());
+		if (result instanceof type.errors) {
+			return new TypeError(result.summary);
+		}
+		return result;
+	});
+};
+
+/**
+ * Creates a Hasura store for managing connections and query execution
  * @param options - Configuration options
  * @returns Hasura store with state and methods
  */
 const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
-	const { storage, storageKey = 'hasura_connection' } = options;
+	const { storage, storageKey = 'hasura_serverList' } = options;
 
-	let server = $state('');
-	let adminPassword = $state('');
+	let serverList = $state<Server[]>([]);
+	let selectedServerId = $state<string | undefined>(undefined);
 	let connectionStatus = $state<HasuraConnectionStatus>({ status: 'idle' });
 
-	// Load saved connection from storage
+	// Load saved connections from storage
 	if (storage) {
 		try {
-			const savedConnection = storage.getItem(storageKey);
-			if (savedConnection) {
-				const hasuraConnection = parseHasuraConnectionJSON(savedConnection);
-				if (hasuraConnection instanceof type.errors) {
-					throw new TypeError(hasuraConnection.summary);
+			const savedserverList = storage.getItem(storageKey);
+			if (savedserverList) {
+				const hasuraserverList = parseHasuraserverListJSON(savedserverList);
+				if (hasuraserverList instanceof type.errors) {
+					throw new TypeError(hasuraserverList.summary);
 				}
-				server = hasuraConnection.server;
-				adminPassword = hasuraConnection.adminPassword;
+        serverList = hasuraserverList.serverList;
+        selectedServerId = hasuraserverList.selectedServerId;
 			}
 		} catch (error) {
-			console.error('Failed to load Hasura connection from storage:', error);
+			console.error('Failed to load Hasura connections from storage:', error);
 		}
 	}
 
-	// Save connection to storage whenever it changes
+	// Save serverList to storage whenever they change
 	if (storage) {
 		$effect(() => {
 			try {
 				storage.setItem(
 					storageKey,
 					JSON.stringify({
-						server,
-						adminPassword
-					} satisfies HasuraConnection)
+						serverList,
+						selectedServerId
+					})
 				);
 			} catch (error) {
-				console.error('Failed to save Hasura connection to storage:', error);
+				console.error('Failed to save Hasura connections to storage:', error);
 			}
 		});
 	}
 
 	/**
-	 * Updates the server connection information
-	 * @param server - The Hasura server URL
-	 * @param adminPassword - The admin password
+	 * Gets the selected server object
 	 */
-	const updateConnection = (nextServer: string, nextAdminPassword: string): void => {
-		if (nextServer !== server || nextAdminPassword !== adminPassword) {
-			server = nextServer;
-			adminPassword = nextAdminPassword;
+	const getSelectedServer = (): Server | undefined => {
+		if (!selectedServerId) return undefined;
+		return serverList.find((s) => s.id === selectedServerId);
+	};
+
+	/**
+	 * Adds a new server to the list
+	 * @returns The ID of the new server
+	 */
+	const addServer = (name: string, url: string, password: string): string => {
+		const id = crypto.randomUUID();
+		const newServer = { id, name, url, password };
+		serverList = [...serverList, newServer];
+
+		// If this is the first server, select it automatically
+		if (serverList.length === 1) {
+			selectedServerId = id;
+		}
+
+		return id;
+	};
+
+	/**
+	 * Updates an existing server
+	 */
+	const updateServer = (id: string, name: string, url: string, password: string): void => {
+		serverList = serverList.map((server) =>
+			server.id === id ? { ...server, name, url, password } : server
+		);
+
+		if (id === selectedServerId) {
 			connectionStatus = { status: 'idle' };
 		}
 	};
 
 	/**
-	 * Clears the current connection
+	 * Removes a server from the list
 	 */
-	const clearConnection = (): void => {
-		updateConnection('', '');
+	const removeServer = (id: string): void => {
+		serverList = serverList.filter((server) => server.id !== id);
+
+		// If we removed the selected server, clear selection or select another one
+		if (id === selectedServerId) {
+			selectedServerId = serverList.length > 0 ? serverList[0].id : undefined;
+			connectionStatus = { status: 'idle' };
+		}
 	};
 
 	/**
-	 * Tests if the current server and admin password combination is valid
+	 * Selects a server by ID
+	 */
+	const selectServer = (id: string): void => {
+		const server = serverList.find((s) => s.id === id);
+		if (server) {
+			selectedServerId = id;
+			connectionStatus = { status: 'idle' };
+		}
+	};
+
+	/**
+	 * Tests if the currently selected server connection is valid
 	 * @returns Whether the connection is valid
 	 */
 	const testConnection = async (): Promise<boolean> => {
-		if (!server || !adminPassword) {
+		const server = getSelectedServer();
+		if (!server) {
 			return false;
 		}
 
 		connectionStatus = { status: 'loading' };
 
-		const result = await executeSQL('SELECT 1');
+		const result = await executeSQL(server, 'SELECT 1');
 
 		if (result instanceof Error) {
 			connectionStatus = { status: 'error', error: result };
@@ -179,107 +314,64 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 	};
 
 	/**
-	 * Executes a GraphQL query against the Hasura server
-	 * @param query - The GraphQL query to execute
-	 * @param variables - Variables for the GraphQL query
-	 * @returns The query result
+	 * Wraps the standalone executeGraphQL function for the selected server
 	 */
-	const executeGraphQL = async <T = Record<string, unknown>>(
+	const storeExecuteGraphQL = async <T = Record<string, unknown>>(
 		query: string,
 		variables: Record<string, unknown> = {}
 	): Promise<{ data: T } | Error> => {
-		return errorBoundary(async () => {
-			const response = await fetch(`${server}/v1/graphql`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'x-hasura-admin-secret': adminPassword
-				},
-				body: JSON.stringify({
-					query,
-					variables
-				})
-			});
+		const server = getSelectedServer();
+		if (!server) {
+			return new Error('No server selected');
+		}
 
-			const data = (await response.json()) as GraphQLResult<T>;
-
-			// Store the last executed query
-			if (data.errors?.length) {
-				const errorMessage = data.errors[0]?.message || 'GraphQL query failed';
-				throw new Error(errorMessage);
-			}
-
-			return data as { data: T };
-		});
+		return executeGraphQL<T>(server, query, variables);
 	};
 
 	/**
-	 * Executes a raw SQL query against the Hasura server
+	 * Wraps the standalone executeSQL function for the selected server
 	 */
-	const executeSQL = async (
+	const storeExecuteSQL = async (
 		sql: string,
 		options: ExecuteSQLOptions = {}
 	): Promise<HasuraQueryResult | Error> => {
-		const { allowMutations = false } = options;
+		const server = getSelectedServer();
+		if (!server) {
+			return new Error('No server selected');
+		}
 
-		return errorBoundary(async () => {
-			const response = await fetch(`${server}/v2/query`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'x-hasura-admin-secret': adminPassword
-				},
-				body: JSON.stringify({
-					status: 'run_sql',
-					args: {
-						source: 'default',
-						sql,
-						cascade: false,
-						read_only: !allowMutations
-					}
-				})
-			});
-
-			if (!response.ok) {
-				const errorData = parseHasuraQueryError(await response.json());
-				if (errorData instanceof type.errors) {
-					return new TypeError(errorData.summary);
-				}
-				return new Error(errorData.error || 'SQL query failed');
-			}
-
-			const result = parseHasuraQueryResult(await response.json());
-			if (result instanceof type.errors) {
-				return new TypeError(result.summary);
-			}
-			return result;
-		});
+		return executeSQL(server, sql, options);
 	};
 
 	return {
-		get server() {
-			return server;
+		get serverList() {
+			return serverList;
 		},
-		get adminPassword() {
-			return adminPassword;
+		get selectedServer() {
+			return getSelectedServer();
 		},
 		get connection() {
 			return connectionStatus;
 		},
 
 		// Methods
-		updateConnection,
-		clearConnection,
+		addServer,
+		updateServer,
+		removeServer,
+		selectServer,
 		testConnection,
-		executeGraphQL,
-		executeSQL
+		executeGraphQL: storeExecuteGraphQL,
+		executeSQL: storeExecuteSQL
 	};
 };
 
-export { createHasuraStore };
+export { createHasuraStore, executeGraphQL, executeSQL };
 
 export type {
 	HasuraStore,
+	Server,
 	GraphQLResult,
+	HasuraQueryResult,
 	HasuraStoreOptions,
+	ExecuteSQLOptions
 };

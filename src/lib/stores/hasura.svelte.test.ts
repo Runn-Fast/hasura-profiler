@@ -16,75 +16,140 @@ const test = anyTest.extend({
 test('should initialize with empty state', () => {
 	const hasuraStore = createHasuraStore();
 
-	expect(hasuraStore.server).toBe('');
-	expect(hasuraStore.adminPassword).toBe('');
+	expect(hasuraStore.serverList).toEqual([]);
+	expect(hasuraStore.selectedServer).toBeUndefined();
 	expect(hasuraStore.connection.status).toBe('idle');
 });
 
-test('should load connection from storage', () => {
+test('should load servers from storage', () => {
 	const cleanup = $effect.root(() => {
-		const savedConnection = {
-			server: 'http://localhost:8080',
-			adminPassword: 'testPassword'
+		const savedServerList = {
+			serverList: [
+				{
+					id: '123',
+					name: 'Test Server',
+					url: 'http://localhost:8080',
+					password: 'testPassword'
+				}
+			],
+			selectedServerId: '123'
 		};
 
 		// Create a store with pre-populated storage using our factory
 		const storageWithData = new MockStorage({
-			hasura_connection: JSON.stringify(savedConnection)
+			hasura_serverList: JSON.stringify(savedServerList)
 		});
 
 		const storeWithConnection = createHasuraStore({ storage: storageWithData });
 
-		expect(storeWithConnection.server).toBe(savedConnection.server);
-		expect(storeWithConnection.adminPassword).toBe(savedConnection.adminPassword);
+		expect(storeWithConnection.serverList).toHaveLength(1);
+		expect(storeWithConnection.selectedServer).toBeDefined();
+		expect(storeWithConnection.selectedServer?.name).toBe('Test Server');
+		expect(storeWithConnection.selectedServer?.url).toBe('http://localhost:8080');
+		expect(storeWithConnection.selectedServer?.password).toBe('testPassword');
 		expect(storeWithConnection.connection.status).toBe('idle');
 	});
 
 	cleanup();
 });
 
-test('should update connection and save to storage', ({ storage }) => {
+test('should add a new server', ({ storage }) => {
 	const cleanup = $effect.root(() => {
 		const hasuraStore = createHasuraStore({ storage });
-		const server = 'http://localhost:8080';
-		const adminPassword = 'testPassword';
 
-		hasuraStore.updateConnection(server, adminPassword);
+		const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', 'testPassword');
 		flushSync();
 
-		expect(hasuraStore.server).toBe(server);
-		expect(hasuraStore.adminPassword).toBe(adminPassword);
+		expect(hasuraStore.serverList).toHaveLength(1);
+		expect(hasuraStore.serverList[0].id).toBe(serverId);
+		expect(hasuraStore.serverList[0].name).toBe('Test Server');
+		expect(hasuraStore.serverList[0].url).toBe('http://localhost:8080');
+		expect(hasuraStore.serverList[0].password).toBe('testPassword');
+
+		// First server should be auto-selected
+		expect(hasuraStore.selectedServer).toBeDefined();
+		expect(hasuraStore.selectedServer?.id).toBe(serverId);
 
 		// Check if it saved to storage
-		const savedData = JSON.parse(storage.getItem('hasura_connection') || '{}');
-		expect(savedData.server).toBe(server);
-		expect(savedData.adminPassword).toBe(adminPassword);
+		const savedData = JSON.parse(storage.getItem('hasura_serverList') || '{}');
+		expect(savedData.serverList).toHaveLength(1);
+		expect(savedData.selectedServerId).toBe(serverId);
 	});
 
 	cleanup();
 });
 
-test('should clear connection', ({ storage }) => {
+test('should update a server', ({ storage }) => {
 	const cleanup = $effect.root(() => {
 		const hasuraStore = createHasuraStore({ storage });
 
-		// Setup initial connection
-		hasuraStore.updateConnection('http://localhost:8080', 'testPassword');
+		// Add a server first
+		const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', 'testPassword');
 		flushSync();
 
-		// Verify it's saved to storage
-		expect(storage.getItem('hasura_connection')).not.toBe(undefined);
-
-		// Clear connection
-		hasuraStore.clearConnection();
+		// Update the server
+		hasuraStore.updateServer(serverId, 'Updated Server', 'http://localhost:8081', 'newPassword');
 		flushSync();
 
-		// Verify state and storage are cleared
-		expect(hasuraStore.server).toBe('');
-		expect(hasuraStore.adminPassword).toBe('');
-		expect(storage.getItem('hasura_connection')).toMatchInlineSnapshot(
-			`"{"server":"","adminPassword":""}"`
-		);
+		expect(hasuraStore.serverList).toHaveLength(1);
+		expect(hasuraStore.serverList[0].name).toBe('Updated Server');
+		expect(hasuraStore.serverList[0].url).toBe('http://localhost:8081');
+		expect(hasuraStore.serverList[0].password).toBe('newPassword');
+
+		// Verify storage was updated
+		const savedData = JSON.parse(storage.getItem('hasura_serverList') || '{}');
+		expect(savedData.serverList[0].name).toBe('Updated Server');
+	});
+
+	cleanup();
+});
+
+test('should remove a server', ({ storage }) => {
+	const cleanup = $effect.root(() => {
+		const hasuraStore = createHasuraStore({ storage });
+
+		// Add a server first
+		const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', 'testPassword');
+		flushSync();
+
+		// Remove the server
+		hasuraStore.removeServer(serverId);
+		flushSync();
+
+		expect(hasuraStore.serverList).toHaveLength(0);
+		expect(hasuraStore.selectedServer).toBeUndefined();
+
+		// Verify storage was updated
+		const savedData = JSON.parse(storage.getItem('hasura_serverList') || '{}');
+		expect(savedData.serverList).toHaveLength(0);
+		expect(savedData.selectedServerId).toBeUndefined();
+	});
+
+	cleanup();
+});
+
+test('should select a server', ({ storage }) => {
+	const cleanup = $effect.root(() => {
+		const hasuraStore = createHasuraStore({ storage });
+
+		// Add two servers
+		const serverId1 = hasuraStore.addServer('Test Server 1', 'http://localhost:8080', 'password1');
+		const serverId2 = hasuraStore.addServer('Test Server 2', 'http://localhost:8081', 'password2');
+		flushSync();
+
+		// First server should be selected by default
+		expect(hasuraStore.selectedServer?.id).toBe(serverId1);
+
+		// Select the second server
+		hasuraStore.selectServer(serverId2);
+		flushSync();
+
+		expect(hasuraStore.selectedServer?.id).toBe(serverId2);
+		expect(hasuraStore.selectedServer?.name).toBe('Test Server 2');
+
+		// Verify storage was updated
+		const savedData = JSON.parse(storage.getItem('hasura_serverList') || '{}');
+		expect(savedData.selectedServerId).toBe(serverId2);
 	});
 
 	cleanup();
@@ -110,8 +175,9 @@ test('should test connection successfully', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Test connection
@@ -146,8 +212,9 @@ test('should handle connection failure', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Test connection
@@ -178,8 +245,9 @@ test('should execute GraphQL query successfully', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add and select a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Execute GraphQL query
@@ -209,8 +277,9 @@ test('should handle GraphQL query with errors', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add and select a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Execute GraphQL query that will fail
@@ -245,8 +314,9 @@ test('should execute SQL query successfully', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add and select a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Execute SQL query
@@ -274,8 +344,9 @@ test('should handle SQL query errors', async ({ agent }) => {
 
 	const hasuraStore = createHasuraStore();
 
-	// Setup initial connection
-	hasuraStore.updateConnection('http://localhost:8080', adminSecret);
+	// Add and select a server
+	const serverId = hasuraStore.addServer('Test Server', 'http://localhost:8080', adminSecret);
+	hasuraStore.selectServer(serverId);
 	flushSync();
 
 	// Execute invalid SQL query
@@ -287,4 +358,21 @@ test('should handle SQL query errors', async ({ agent }) => {
 	// Verify error state
 	assertError(result);
 	expect(result.message).toBe('syntax error at or near "INVALID"');
+});
+
+test('should handle operations with no server selected', async () => {
+	const hasuraStore = createHasuraStore();
+
+	// No server is selected
+	expect(hasuraStore.selectedServer).toBeUndefined();
+
+	// Try to execute a GraphQL query
+	const graphqlResult = await hasuraStore.executeGraphQL('query { test }');
+	assertError(graphqlResult);
+	expect(graphqlResult.message).toBe('No server selected');
+
+	// Try to execute an SQL query
+	const sqlResult = await hasuraStore.executeSQL('SELECT 1');
+	assertError(sqlResult);
+	expect(sqlResult.message).toBe('No server selected');
 });

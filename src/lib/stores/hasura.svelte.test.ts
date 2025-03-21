@@ -1,6 +1,6 @@
 import { test as anyTest, expect } from 'vitest';
 import { flushSync } from 'svelte';
-import { assertOk, assertError } from '@stayradiated/error-boundary'
+import { assertOk, assertError } from '@stayradiated/error-boundary';
 
 import { createHasuraStore } from './hasura.svelte.js';
 
@@ -18,9 +18,7 @@ test('should initialize with empty state', () => {
 
 	expect(hasuraStore.server).toBe('');
 	expect(hasuraStore.adminPassword).toBe('');
-	expect(hasuraStore.isConnected).toBe(false);
-	expect(hasuraStore.isLoading).toBe(false);
-	expect(hasuraStore.error).toBe(undefined);
+	expect(hasuraStore.connection.status).toBe('idle');
 });
 
 test('should load connection from storage', () => {
@@ -39,7 +37,7 @@ test('should load connection from storage', () => {
 
 		expect(storeWithConnection.server).toBe(savedConnection.server);
 		expect(storeWithConnection.adminPassword).toBe(savedConnection.adminPassword);
-		expect(storeWithConnection.isConnected).toBe(false);
+		expect(storeWithConnection.connection.status).toBe('idle');
 	});
 
 	cleanup();
@@ -66,7 +64,7 @@ test('should update connection and save to storage', ({ storage }) => {
 	cleanup();
 });
 
-test('should clear connection and remove from storage', ({ storage }) => {
+test('should clear connection', ({ storage }) => {
 	const cleanup = $effect.root(() => {
 		const hasuraStore = createHasuraStore({ storage });
 
@@ -84,7 +82,9 @@ test('should clear connection and remove from storage', ({ storage }) => {
 		// Verify state and storage are cleared
 		expect(hasuraStore.server).toBe('');
 		expect(hasuraStore.adminPassword).toBe('');
-		expect(storage.getItem('hasura_connection')).toBe(null);
+		expect(storage.getItem('hasura_connection')).toMatchInlineSnapshot(
+			`"{"server":"","adminPassword":""}"`
+		);
 	});
 
 	cleanup();
@@ -116,13 +116,13 @@ test('should test connection successfully', async ({ agent }) => {
 
 	// Test connection
 	const result = await hasuraStore.testConnection();
-  assertOk(result)
-	flushSync();
+
+	assertOk(result);
+	expect(result).toBe(true);
 
 	// Verify connection state
-	expect(result).toBe(true);
-	expect(hasuraStore.isConnected).toBe(true);
-	expect(hasuraStore.error).toBe(undefined);
+	flushSync();
+	expect(hasuraStore.connection.status).toBe('ready');
 });
 
 test('should handle connection failure', async ({ agent }) => {
@@ -138,9 +138,9 @@ test('should handle connection failure', async ({ agent }) => {
 			}
 		})
 		.reply(403, {
-      "error":"invalid x-hasura-admin-secret/x-hasura-access-key",
-      "path":"$",
-      "code":"access-denied"
+			error: 'invalid x-hasura-admin-secret/x-hasura-access-key',
+			path: '$',
+			code: 'access-denied'
 		})
 		.times(1);
 
@@ -152,20 +152,23 @@ test('should handle connection failure', async ({ agent }) => {
 
 	// Test connection
 	const result = await hasuraStore.testConnection();
-  assertOk(result)
-	flushSync();
+	assertOk(result);
+	expect(result).toBe(false);
 
 	// Verify connection state
-	expect(result).toBe(false);
-	expect(hasuraStore.isConnected).toBe(false);
-	expect(hasuraStore.error).toBe('invalid x-hasura-admin-secret/x-hasura-access-key');
+	flushSync();
+	expect(hasuraStore.connection.status).toBe('error');
 });
 
 test('should execute GraphQL query successfully', async ({ agent }) => {
-  const adminSecret = 'test-password-3';
+	const adminSecret = 'test-password-3';
 
 	agent
-		.intercept({ method: 'POST', path: '/v1/graphql', headers: { 'x-hasura-admin-secret': adminSecret } })
+		.intercept({
+			method: 'POST',
+			path: '/v1/graphql',
+			headers: { 'x-hasura-admin-secret': adminSecret }
+		})
 		.reply(200, {
 			data: {
 				users: [{ id: 1, name: 'Test User' }]
@@ -184,19 +187,21 @@ test('should execute GraphQL query successfully', async ({ agent }) => {
 	const result = await hasuraStore.executeGraphQL<{
 		users: Array<{ id: number; name: string }>;
 	}>(query);
-  assertOk(result)
-	flushSync();
 
 	// Verify result
+	assertOk(result);
 	expect(result.data.users[0].name).toBe('Test User');
-	expect(hasuraStore.error).toBe(undefined);
 });
 
 test('should handle GraphQL query with errors', async ({ agent }) => {
-  const adminSecret = 'test-password-4';
+	const adminSecret = 'test-password-4';
 
 	agent
-		.intercept({ method: 'POST', path: '/v1/graphql', headers: { 'x-hasura-admin-secret': adminSecret } })
+		.intercept({
+			method: 'POST',
+			path: '/v1/graphql',
+			headers: { 'x-hasura-admin-secret': adminSecret }
+		})
 		.reply(200, {
 			errors: [{ message: 'Field does not exist' }]
 		})
@@ -212,19 +217,22 @@ test('should handle GraphQL query with errors', async ({ agent }) => {
 	const query = `query { nonExistentField }`;
 
 	// Expect the promise to reject
-	const result = await hasuraStore.executeGraphQL(query)
-  assertError(result)
-	flushSync();
+	const result = await hasuraStore.executeGraphQL(query);
 
 	// Verify error state
-	expect(hasuraStore.error).toBe('Field does not exist');
+	assertError(result);
+	expect(result.message).toBe('Field does not exist');
 });
 
 test('should execute SQL query successfully', async ({ agent }) => {
-  const adminSecret = 'test-password-5';
+	const adminSecret = 'test-password-5';
 
 	agent
-		.intercept({ method: 'POST', path: '/v2/query', headers: { 'x-hasura-admin-secret': adminSecret } })
+		.intercept({
+			method: 'POST',
+			path: '/v2/query',
+			headers: { 'x-hasura-admin-secret': adminSecret }
+		})
 		.reply(200, {
 			result_type: 'TuplesOk',
 			result: [
@@ -244,25 +252,23 @@ test('should execute SQL query successfully', async ({ agent }) => {
 	// Execute SQL query
 	const sql = 'SELECT id, name FROM users';
 	const result = await hasuraStore.executeSQL(sql);
-  assertOk(result)
-	flushSync();
 
 	// Verify result
+	assertOk(result);
 	expect(result.result_type).toBe('TuplesOk');
 	expect(result.result).toHaveLength(3); // Header row + 2 data rows
 	expect(result.result[1][1]).toBe('Test User');
-	expect(hasuraStore.error).toBe(undefined);
 });
 
 test('should handle SQL query errors', async ({ agent }) => {
-  const adminSecret = 'test-password-6';
+	const adminSecret = 'test-password-6';
 
 	agent
 		.intercept({ method: 'POST', path: '/v2/query' })
 		.reply(400, {
 			error: 'syntax error at or near "INVALID"',
-      path: '$[0]',
-      code: 'postgres-error'
+			path: '$[0]',
+			code: 'postgres-error'
 		})
 		.times(1);
 
@@ -276,10 +282,9 @@ test('should handle SQL query errors', async ({ agent }) => {
 	const sql = 'INVALID SQL QUERY';
 
 	// Expect the promise to reject
-	const result = await hasuraStore.executeSQL(sql)
-  assertError(result)
-	flushSync();
+	const result = await hasuraStore.executeSQL(sql);
 
 	// Verify error state
-	expect(hasuraStore.error).toBe('syntax error at or near "INVALID"');
+	assertError(result);
+	expect(result.message).toBe('syntax error at or near "INVALID"');
 });

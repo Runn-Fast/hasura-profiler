@@ -37,17 +37,15 @@ type Attributes = void | {
 /**
  * Factory for creating mock storage instances
  */
-const storageFactory = defineFactory<Dependencies, Attributes, Storage>(
-	async (
-		 
-		{},
-		attrs
-	) => {
-		return {
-			value: new MockStorage(attrs?.initialData)
-		};
-	}
-);
+const storageFactory = defineFactory<Dependencies, Attributes, Storage>(async (
+  /* eslint-disable-next-line no-empty-pattern */
+  {},
+  attrs
+) => {
+	return {
+		value: new MockStorage(attrs?.initialData)
+	};
+});
 
 /**
  * Hook for using mock storage in tests

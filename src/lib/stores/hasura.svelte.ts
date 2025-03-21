@@ -15,29 +15,6 @@ const parseHasuraConnectionJSON = type('string.json.parse').to({
 type HasuraConnection = typeof parseHasuraConnectionJSON.infer;
 
 /**
- * Connection status types
- */
-type ConnectionStatus = 'connecting' | 'connected' | 'error' | 'configured' | 'unconfigured';
-
-/**
- * Connection history item
- */
-type ConnectionHistoryItem = {
-	server: string;
-	lastUsed: Date;
-};
-
-/**
- * Last executed query information
- */
-type QueryInfo = {
-	query: string;
-	variables: Record<string, unknown>;
-	timestamp: Date;
-	hasErrors: boolean;
-};
-
-/**
  * GraphQL query result
  */
 interface GraphQLResult<T = Record<string, unknown>> {
@@ -74,15 +51,12 @@ const parseHasuraQueryError = type({
 		statement: 'string'
 	}
 });
-type HasuraQueryError = typeof parseHasuraQueryError.infer;
 
-/**
- * Schema query result
- */
-type SchemaResult = {
-	result: Array<unknown>;
-	[key: string]: unknown;
-};
+type HasuraConnectionStatus =
+	| { status: 'idle' }
+	| { status: 'loading' }
+	| { status: 'ready' }
+	| { status: 'error'; error: Error };
 
 /**
  * Options for creating the Hasura store
@@ -103,11 +77,7 @@ type HasuraStore = {
 	// State properties
 	readonly server: string;
 	readonly adminPassword: string;
-	readonly isConnected: boolean;
-	readonly isLoading: boolean;
-	readonly error: string | undefined;
-	readonly connectionHistory: ReadonlyArray<ConnectionHistoryItem>;
-	readonly connectionStatus: ConnectionStatus;
+	readonly connection: HasuraConnectionStatus;
 
 	// Methods
 	updateConnection(server: string, adminPassword: string): void;
@@ -121,27 +91,6 @@ type HasuraStore = {
 };
 
 /**
- * Table information from Hasura schema
- */
-type TableInfo = {
-	table_schema: string;
-	table_name: string;
-	table_type: 'TABLE' | 'VIEW' | 'FOREIGN TABLE' | 'MATERIALIZED VIEW' | 'PARTITIONED TABLE';
-	columns: ColumnInfo[];
-};
-
-/**
- * Column information from Hasura schema
- */
-type ColumnInfo = {
-	column_name: string;
-	data_type: string;
-	is_nullable: 'YES' | 'NO';
-	column_default?: string;
-	is_identity: boolean;
-};
-
-/**
  * Creates a Hasura store for managing connection and query execution
  * @param options - Configuration options
  * @returns Hasura store with state and methods
@@ -151,11 +100,7 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 
 	let server = $state('');
 	let adminPassword = $state('');
-	let isConnected = $state(false);
-	let isLoading = $state(false);
-	let error = $state<string | undefined>(undefined);
-	let lastQuery = $state<QueryInfo | undefined>(undefined);
-	const connectionHistory = $state<ConnectionHistoryItem[]>([]);
+	let connectionStatus = $state<HasuraConnectionStatus>({ status: 'idle' });
 
 	// Load saved connection from storage
 	if (storage) {
@@ -174,32 +119,19 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 		}
 	}
 
-	// Derived state
-	const isConnectionConfigured = $derived(Boolean(server && adminPassword));
-
-	const connectionStatus = $derived.by<ConnectionStatus>(() => {
-		if (isLoading) return 'connecting';
-		if (isConnected) return 'connected';
-		if (error) return 'error';
-		if (isConnectionConfigured) return 'configured';
-		return 'unconfigured';
-	});
-
 	// Save connection to storage whenever it changes
 	if (storage) {
 		$effect(() => {
-			if (server || adminPassword) {
-				try {
-					storage.setItem(
-						storageKey,
-						JSON.stringify({
-							server: server,
-							adminPassword: adminPassword
-						} satisfies HasuraConnection)
-					);
-				} catch (error) {
-					console.error('Failed to save Hasura connection to storage:', error);
-				}
+			try {
+				storage.setItem(
+					storageKey,
+					JSON.stringify({
+						server,
+						adminPassword
+					} satisfies HasuraConnection)
+				);
+			} catch (error) {
+				console.error('Failed to save Hasura connection to storage:', error);
 			}
 		});
 	}
@@ -210,28 +142,18 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 	 * @param adminPassword - The admin password
 	 */
 	const updateConnection = (nextServer: string, nextAdminPassword: string): void => {
-		server = nextServer;
-		adminPassword = nextAdminPassword;
-		isConnected = false;
-		error = undefined;
+		if (nextServer !== server || nextAdminPassword !== adminPassword) {
+			server = nextServer;
+			adminPassword = nextAdminPassword;
+			connectionStatus = { status: 'idle' };
+		}
 	};
 
 	/**
 	 * Clears the current connection
 	 */
 	const clearConnection = (): void => {
-		server = '';
-		adminPassword = '';
-		isConnected = false;
-		error = undefined;
-
-		if (storage) {
-			try {
-				storage.removeItem(storageKey);
-			} catch (error) {
-				console.error('Failed to remove Hasura connection from storage:', error);
-			}
-		}
+		updateConnection('', '');
 	};
 
 	/**
@@ -240,19 +162,20 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 	 */
 	const testConnection = async (): Promise<boolean> => {
 		if (!server || !adminPassword) {
-			error = 'Server URL and admin password are required';
 			return false;
 		}
+
+		connectionStatus = { status: 'loading' };
 
 		const result = await executeSQL('SELECT 1');
 
 		if (result instanceof Error) {
-      isConnected = false;
-		} else {
-      isConnected = true;
-    }
+			connectionStatus = { status: 'error', error: result };
+			return false;
+		}
 
-		return isConnected;
+		connectionStatus = { status: 'ready' };
+		return true;
 	};
 
 	/**
@@ -265,10 +188,7 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 		query: string,
 		variables: Record<string, unknown> = {}
 	): Promise<{ data: T } | Error> => {
-		isLoading = true;
-		error = undefined;
-
-    const result = await errorBoundary(async () => {
+		return errorBoundary(async () => {
 			const response = await fetch(`${server}/v1/graphql`, {
 				method: 'POST',
 				headers: {
@@ -284,27 +204,13 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 			const data = (await response.json()) as GraphQLResult<T>;
 
 			// Store the last executed query
-			lastQuery = {
-				query,
-				variables,
-				timestamp: new Date(),
-				hasErrors: Boolean(data.errors?.length)
-			};
-
 			if (data.errors?.length) {
-				error = data.errors[0]?.message || 'GraphQL query failed';
-				throw new Error(error);
+				const errorMessage = data.errors[0]?.message || 'GraphQL query failed';
+				throw new Error(errorMessage);
 			}
 
 			return data as { data: T };
-    })
-    isLoading = false;
-
-    if (result instanceof Error) {
-			error = result.message
-			return result;
-    }
-    return result
+		});
 	};
 
 	/**
@@ -316,10 +222,7 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 	): Promise<HasuraQueryResult | Error> => {
 		const { allowMutations = false } = options;
 
-		isLoading = true;
-		error = undefined;
-
-		const result = await errorBoundary(async () => {
+		return errorBoundary(async () => {
 			const response = await fetch(`${server}/v2/query`, {
 				method: 'POST',
 				headers: {
@@ -327,7 +230,7 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 					'x-hasura-admin-secret': adminPassword
 				},
 				body: JSON.stringify({
-					type: 'run_sql',
+					status: 'run_sql',
 					args: {
 						source: 'default',
 						sql,
@@ -345,20 +248,13 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 				return new Error(errorData.error || 'SQL query failed');
 			}
 
-			const result = parseHasuraQueryResult(await response.json())
-      if (result instanceof type.errors) {
-        return new TypeError(result.summary);
-      }
-      return result;
-		});
-		isLoading = false;
-		if (result instanceof Error) {
-			error = result.message;
+			const result = parseHasuraQueryResult(await response.json());
+			if (result instanceof type.errors) {
+				return new TypeError(result.summary);
+			}
 			return result;
-		}
-		return result;
+		});
 	};
-
 
 	return {
 		get server() {
@@ -367,19 +263,7 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 		get adminPassword() {
 			return adminPassword;
 		},
-		get isConnected() {
-			return isConnected;
-		},
-		get isLoading() {
-			return isLoading;
-		},
-		get error() {
-			return error;
-		},
-		get connectionHistory() {
-			return connectionHistory;
-		},
-		get connectionStatus() {
+		get connection() {
 			return connectionStatus;
 		},
 
@@ -388,18 +272,14 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 		clearConnection,
 		testConnection,
 		executeGraphQL,
-		executeSQL,
+		executeSQL
 	};
 };
 
 export { createHasuraStore };
+
 export type {
 	HasuraStore,
-	ConnectionHistoryItem,
-	QueryInfo,
 	GraphQLResult,
-	SchemaResult,
 	HasuraStoreOptions,
-	TableInfo,
-	ColumnInfo
 };

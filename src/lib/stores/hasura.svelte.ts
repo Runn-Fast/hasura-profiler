@@ -156,7 +156,7 @@ const executeSQL = async (
 				'x-hasura-admin-secret': server.password
 			},
 			body: JSON.stringify({
-				status: 'run_sql',
+				type: 'run_sql',
 				args: {
 					source: 'default',
 					sql,
@@ -203,8 +203,8 @@ const createHasuraStore = (options: HasuraStoreOptions = {}): HasuraStore => {
 				if (hasuraserverList instanceof type.errors) {
 					throw new TypeError(hasuraserverList.summary);
 				}
-        serverList = hasuraserverList.serverList;
-        selectedServerId = hasuraserverList.selectedServerId;
+				serverList = hasuraserverList.serverList;
+				selectedServerId = hasuraserverList.selectedServerId;
 			}
 		} catch (error) {
 			console.error('Failed to load Hasura connections from storage:', error);

@@ -9,6 +9,8 @@
 	import GraphQLForm from '$lib/components/GraphQLForm.svelte';
 	import GraphQLExecutor from '$lib/components/GraphQLExecutor.svelte';
 
+  import HasuraServerManager from './HasuraServerManager.svelte'
+
 	// State management
 	let hasuraServer = '';
 	let hasuraAdminPassword = '';
@@ -106,6 +108,10 @@ query GetUserWithRole($email: String!) {
 <div class="app-container">
 	<Header />
 
+  <dialog open>
+    <HasuraServerManager />
+  </dialog>
+
 	<main class="main-content">
 		<div class="forms-container">
 			<HasuraServerForm {hasuraServer} {hasuraAdminPassword} on:update={handleServerUpdate} />
@@ -126,6 +132,10 @@ query GetUserWithRole($email: String!) {
 </div>
 
 <style>
+  dialog {
+    min-width: 800px;
+  }
+
 	.app-container {
 		font-family: Arial, sans-serif;
 		max-width: 1200px;
